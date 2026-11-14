@@ -40,6 +40,37 @@ CREATE TABLE IF NOT EXISTS import_batches (
     received_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Change feed for the downstream risk data warehouse --------------------------
+-- One row per *actually inserted* credit event version, numbered in commit
+-- order. Written in the same transaction as the version row itself, so a
+-- version and its feed entry appear (or vanish, on rollback) atomically.
+-- Rejected imports, rolled-back transactions and same-value re-imports write
+-- nothing here. Rows are immutable and never deleted, so any old cursor can
+-- be replayed.
+CREATE TABLE IF NOT EXISTS credit_change_feed (
+    seq             BIGINT PRIMARY KEY,
+    event_id        TEXT NOT NULL,
+    customer_id     TEXT NOT NULL,
+    business_time   TIMESTAMPTZ NOT NULL,
+    known_time      TIMESTAMPTZ NOT NULL,
+    income          INTEGER,
+    withdrawn       BOOLEAN NOT NULL,
+    ingest_batch_id UUID NOT NULL REFERENCES import_batches (ingest_batch_id),
+    committed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Single-row allocator for feed seq numbers. An import bumps it with a
+-- locking UPDATE as the last step of its transaction; the row lock is held
+-- until commit/rollback, so seq ranges are handed out in commit order across
+-- every API process sharing the database. (A plain SEQUENCE cannot guarantee
+-- this: a later-committing transaction may already hold a lower nextval, and
+-- rolled-back transactions would leave permanent gaps.)
+CREATE TABLE IF NOT EXISTS change_feed_seq (
+    id   BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    next BIGINT NOT NULL
+);
+INSERT INTO change_feed_seq (id, next) VALUES (TRUE, 1) ON CONFLICT (id) DO NOTHING;
+
 -- Generation batches (immutable work units) ----------------------------------
 CREATE TABLE IF NOT EXISTS batches (
     batch_id          UUID PRIMARY KEY,

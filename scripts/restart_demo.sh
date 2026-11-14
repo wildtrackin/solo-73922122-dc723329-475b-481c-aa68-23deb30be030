@@ -79,3 +79,27 @@ assert ids == sorted(ids), "pagination order broken!"
 assert all(i["income"] is not None and i["source_event_id"] for i in items), "missing backfill!"
 print(f"verified {len(ids)} unique, fully-computed, source-annotated rows; failover demo OK")
 PY
+
+echo "== change feed continuity after the restart =="
+python3 - "$N" <<'PY'
+import json, sys, urllib.request
+n = int(sys.argv[1])
+def get(path):
+    with urllib.request.urlopen("http://127.0.0.1:8001" + path, timeout=30) as r:
+        return json.loads(r.read())
+# Page through the whole feed (post-restart reads must keep working).
+items, cursor = [], 0
+while True:
+    page = get(f"/api/v1/credit-changes?cursor={cursor}&limit=200")
+    items += page["items"]
+    if page["next_cursor"] == cursor:
+        break
+    cursor = page["next_cursor"]
+bulk = [i for i in items if i["event_id"].startswith("EB")]
+assert len(bulk) == n, (len(bulk), n)                      # every bulk version published
+assert len({i["event_id"] for i in bulk}) == n, "duplicate feed rows!"
+seqs = [i["seq"] for i in items]
+assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), "feed order broken"
+print(f"change feed intact after restart: {len(items)} rows, "
+      f"all {n} bulk versions present exactly once, seqs ordered")
+PY

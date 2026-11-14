@@ -101,3 +101,23 @@ class ImportAccepted(BaseModel):
     ingest_batch_id: uuid.UUID
     imported: int
     kind: str
+
+
+class CreditChangeRow(BaseModel):
+    """One actually-inserted credit event version, in commit order."""
+    seq: int
+    event_id: str
+    customer_id: str
+    business_time: datetime
+    known_time: datetime
+    income: int | None
+    withdrawn: bool
+    ingest_batch_id: uuid.UUID
+    committed_at: datetime
+
+
+class CreditChangesPage(BaseModel):
+    cursor: int        # echo of the cursor this page was read with
+    next_cursor: int   # pass as `cursor` to continue; unchanged when no new versions
+    limit: int
+    items: list[CreditChangeRow]

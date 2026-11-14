@@ -125,7 +125,8 @@ def main() -> None:
 
     heading("5. 批次完成后再导入迟到更正 -> 不得改变 B1")
     late = json.loads((DATA / "late_correction.json").read_text())
-    print("late correction:", call(BASE2, "POST", "/api/v1/imports/credit-events", late))
+    code, late_acc = call(BASE2, "POST", "/api/v1/imports/credit-events", late)
+    print("late correction:", code, late_acc)
     again = fetch_all_results(BASE1, b1_id, limit=2)
     assert again == results, "completed batch changed!"
     print("B1 results unchanged ✔  (A1 still", by_app["A1"]["income"], ")")
@@ -156,6 +157,55 @@ def main() -> None:
     for b in batches:
         print(b["batch_id"], b["status"], f"{b['processed_items']}/{b['total_items']}",
               "worker:", b["worker_id"])
+
+    heading("9. 版本游标：风控数仓增量续读 GET /api/v1/credit-changes")
+    # 9.1 从头读：步骤 1 的 8 个版本 + 步骤 5 的迟到更正（步骤 2 整批拒绝、
+    #     步骤 6/7 的批次计算均不产生变更）；序号连续即证明拒绝/回滚无空洞。
+    code, page = call(BASE1, "GET", "/api/v1/credit-changes?cursor=0&limit=100")
+    assert code == 200, page
+    items = page["items"]
+    seqs = [it["seq"] for it in items]
+    assert seqs == list(range(1, 10)), seqs
+    last = items[-1]
+    assert (last["event_id"], last["income"], last["ingest_batch_id"]) == (
+        "E1", 51000, late_acc["ingest_batch_id"]), last
+    cursor = page["next_cursor"]
+    print(f"cursor=0 读到 {len(items)} 个版本 (seq 1..9)，next_cursor={cursor}")
+    print("迟到更正版本:", last["event_id"], last["known_time"],
+          "income=", last["income"], "batch=", last["ingest_batch_id"])
+
+    # 9.2 同值重传 -> imported=0，无新版本，游标不前进
+    code, acc = call(BASE1, "POST", "/api/v1/imports/credit-events", events)
+    assert code == 201 and acc["imported"] == 0, acc
+    code, page = call(BASE2, "GET", f"/api/v1/credit-changes?cursor={cursor}&limit=100")
+    assert page["items"] == [] and page["next_cursor"] == cursor, page
+    print("同值重传：imported=0，无新版本，游标不前进 ✔")
+
+    # 9.3 经另一进程导入新事件 -> 沿 next_cursor 续读恰好取得它（不重不漏）
+    new_event = {"events": [{"event_id": "E10", "customer_id": "C1",
+                             "business_time": "2026-04-01T00:00:00Z",
+                             "known_time": "2026-04-02T00:00:00Z",
+                             "income": 88000, "withdrawn": False}]}
+    code, acc10 = call(BASE2, "POST", "/api/v1/imports/credit-events", new_event)
+    assert code == 201 and acc10["imported"] == 1, acc10
+    code, page = call(BASE1, "GET", f"/api/v1/credit-changes?cursor={cursor}&limit=100")
+    assert [it["seq"] for it in page["items"]] == [10], page
+    assert page["items"][0]["event_id"] == "E10"
+    assert page["items"][0]["ingest_batch_id"] == acc10["ingest_batch_id"]
+    cursor = page["next_cursor"]
+    print(f"经另一进程导入后，续读取得 1 个新版本 (seq 10)，next_cursor={cursor} ✔")
+
+    # 9.4 沿旧游标重试：仍能取得原有版本（重启后同样成立——状态全在 PG）
+    seen, cur = [], 0
+    while True:
+        base = BASE1 if len(seen) % 2 == 0 else BASE2  # 交替两个进程读
+        code, page = call(base, "GET", f"/api/v1/credit-changes?cursor={cur}&limit=4")
+        seen.extend(page["items"])
+        if page["next_cursor"] == cur:
+            break
+        cur = page["next_cursor"]
+    assert [it["seq"] for it in seen] == list(range(1, 11)), [it["seq"] for it in seen]
+    print("沿旧游标 0 限量翻页重读：10 个版本依次重现，不重不漏 ✔")
 
     print("\nDEMO FINISHED OK")
 

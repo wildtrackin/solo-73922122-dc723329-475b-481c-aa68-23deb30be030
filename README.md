@@ -35,6 +35,23 @@ FastAPI + PostgreSQL，两个共库 API 进程协作，执行者崩溃后另一�
   `known_time` + `ingested_at`）。批次完成后结果永不变化，新批次才能看到新数据。
 - 批次全部 `COMPLETED` 后才开放分页结果；`PENDING/RUNNING/FAILED` 查询返回 409。
 
+### 版本游标变更流（`credit_change_feed`）
+
+风控数仓已取得征信全量版本，之后只需增量接收新入库的收入变更：
+
+- 每次成功导入**实际新增**的事件版本（同值重传 `ON CONFLICT DO NOTHING` 跳过的不算），
+  连同客户、业务时间、获知时间、收入或撤回状态、导入批次，在**同一事务提交**中写入
+  `credit_change_feed`——版本与变更记录要么同时可见，要么（回滚时）同时消失。
+- **整批拒绝、事务回滚、同值重传不产生任何变更记录**，序号也不会被消耗（无空洞）。
+- 序号 `seq` 由单行分配器 `change_feed_seq` 以**行锁**在事务末尾分配：行锁持有到
+  提交/回滚，因此两个共库 API 进程交错导入时，**序号顺序即提交顺序**——后提交的
+  版本绝不会落在已返回的游标之前（普通 SEQUENCE 做不到这一点：后提交的事务可能
+  早已取走更小的 nextval，回滚还会留下永久空洞）。
+- 变更记录不可变、不删除，旧游标可随时重放；状态全在 PostgreSQL，重启后续读无碍。
+- `GET /api/v1/credit-changes?cursor=&limit=` 返回 `seq > cursor` 的版本（升序、限量）
+  及 `next_cursor`；**没有新版本时 `next_cursor` 不前进**。下游按 `next_cursor`
+  续读即不重不漏。
+
 ## 二、并发与续算（两个共库进程）
 
 每个 uvicorn 进程既提供 HTTP API，又运行一个 worker 循环，全部协调状态在 PostgreSQL 中：
@@ -119,7 +136,21 @@ curl "localhost:8001/api/v1/batches/$BID/results"   # A1 仍是 50000
 # 更正之后新建的批次才能看到 51000
 ```
 
-### 6. 重启续算演示
+### 6. 版本游标增量续读（数仓变更流）
+
+```bash
+# 首次从 0 读：步骤 1 的 8 个版本 + 步骤 5 的迟到更正（步骤 2 整批拒绝无记录）
+curl "localhost:8001/api/v1/credit-changes?cursor=0&limit=100"
+#   -> items[9]，next_cursor=9；序号连续（拒绝/回滚/重传不留空洞）
+curl -X POST localhost:8001/api/v1/imports/credit-events \
+  -H 'Content-Type: application/json' -d @data/seed_events.json   # 同值重传 -> imported=0
+curl "localhost:8002/api/v1/credit-changes?cursor=9&limit=100"
+#   -> items=[] 且 next_cursor 仍为 9（无新版本游标不前进）
+# 经另一进程再导入任意新事件后，沿 cursor=9 续读恰好取得新增版本；
+# 用旧游标重读可随时重放历史版本
+```
+
+### 7. 重启续算演示
 
 ```bash
 bash scripts/restart_demo.sh          # Docker 环境：重启非执行者 + SIGKILL 执行者
@@ -133,11 +164,12 @@ bash scripts/restart_demo.sh          # Docker 环境：重启非执行者 + SIG
 | 脚本 | 作用 |
 |---|---|
 | `scripts/seed.py` | 导入 `data/` 下的虚构申请与事件 |
-| `scripts/demo.py` | 端到端演示（导入、拒绝、时点结果、迟到更正隔离、分页、409 闸门） |
+| `scripts/demo.py` | 端到端演示（导入、拒绝、时点结果、迟到更正隔离、分页、409 闸门、版本游标续读） |
 | `scripts/gen_bulk.py` | 经 API 生成大批量虚构数据 |
 | `scripts/restart_demo.sh` | Docker 下的重启/故障转移演示 |
 | `scripts/lease_failover_test.py` | 不依赖 Docker 的租约接管测试（以 SQL 令租约过期精确模拟 SIGKILL 后的状态） |
 | `scripts/test_pit_sql.py` | 时点重建 SQL 的 10 项边界单元测试（修订/撤回/未来事件/并列/栅栏/空值） |
+| `scripts/test_credit_changes.py` | 版本游标契约测试（同事务发布、拒绝/回滚/重传无变更、提交序分配、双进程交错导入、续读不重不漏、旧游标重放） |
 
 无 Docker 的本地验证方式（需要一个 PostgreSQL 并设置 `DATABASE_URL`）：
 
@@ -148,6 +180,8 @@ DATABASE_URL=postgresql://... uvicorn app.main:app --port 8001 &
 DATABASE_URL=postgresql://... uvicorn app.main:app --port 8002 &
 python3 scripts/demo.py
 DATABASE_URL=postgresql://... python3 scripts/test_pit_sql.py
+python3 scripts/test_credit_changes.py \
+    http://127.0.0.1:8001 http://127.0.0.1:8002 postgresql://...
 DATABASE_URL=postgresql://... python3 scripts/lease_failover_test.py \
     http://127.0.0.1:8001 http://127.0.0.1:8002 postgresql://... 40
 ```
@@ -157,7 +191,8 @@ DATABASE_URL=postgresql://... python3 scripts/lease_failover_test.py \
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/v1/imports/applications` | 整批事务导入申请，重复 ID 全拒绝 |
-| POST | `/api/v1/imports/credit-events` | 整批事务导入事件版本，同键异值全拒绝 |
+| POST | `/api/v1/imports/credit-events` | 整批事务导入事件版本，同键异值全拒绝；实际新增版本同事务写入变更流 |
+| GET | `/api/v1/credit-changes?cursor=&limit=` | 按游标增量读取实际新增的事件版本；无新版本时游标不前进 |
 | POST | `/api/v1/batches` | 生成回填批次（固化受理时输入） |
 | GET | `/api/v1/batches` / `/api/v1/batches/{id}` | 批次状态 |
 | POST | `/api/v1/batches/{id}/resume` | FAILED 批次断点续算 |

@@ -20,6 +20,8 @@ from .models import (
     ApplicationsImport,
     BatchCreateRequest,
     BatchResponse,
+    CreditChangeRow,
+    CreditChangesPage,
     CreditEventsImport,
     ImportAccepted,
     ResultsPage,
@@ -238,21 +240,90 @@ async def import_credit_events(payload: CreditEventsImport) -> ImportAccepted:
                 )
 
             ingest_id = await _record_import(conn, "credit_events", len(events), True, None)
-            inserted = 0
+            inserted: list[tuple[str, datetime, dict]] = []
             for (event_id, known_time), sig in versions.items():
                 # Skip exact duplicates already present (idempotent re-import).
-                tag = await conn.execute(
+                row = await conn.fetchrow(
                     """INSERT INTO credit_event_versions
                            (event_id, customer_id, business_time, known_time,
                             income, withdrawn, ingested_at, ingest_batch_id)
                        VALUES ($1,$2,$3,$4,$5,$6,now(),$7)
-                       ON CONFLICT (event_id, known_time) DO NOTHING""",
+                       ON CONFLICT (event_id, known_time) DO NOTHING
+                       RETURNING event_id""",
                     event_id, sig["customer_id"], sig["business_time"], known_time,
                     sig["income"], sig["withdrawn"], ingest_id,
                 )
-                if tag.endswith("0 1"):
-                    inserted += 1
-    return ImportAccepted(ingest_batch_id=ingest_id, imported=inserted, kind="credit_events")
+                if row:
+                    inserted.append((event_id, known_time, sig))
+
+            # ---- change feed ------------------------------------------------
+            # Publish the actually-inserted versions in the SAME commit so the
+            # downstream warehouse sees a version and its feed entry
+            # atomically. Rejections returned above, rollbacks and same-value
+            # re-imports (nothing inserted) never reach this point.
+            if inserted:
+                inserted.sort(key=lambda t: (t[0], t[1]))
+                # Locking UPDATE on the single allocator row, held until
+                # commit/rollback: concurrent imports from either API process
+                # receive their seq ranges in commit order, so a version that
+                # commits later can never land at or below an already
+                # published cursor. Rollbacks hand the range back untouched.
+                n = len(inserted)
+                next_seq = await conn.fetchval(
+                    "UPDATE change_feed_seq SET next = next + $1 RETURNING next", n
+                )
+                first_seq = next_seq - n
+                await conn.executemany(
+                    """INSERT INTO credit_change_feed
+                           (seq, event_id, customer_id, business_time, known_time,
+                            income, withdrawn, ingest_batch_id)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                    [
+                        (first_seq + i, event_id, sig["customer_id"],
+                         sig["business_time"], known_time, sig["income"],
+                         sig["withdrawn"], ingest_id)
+                        for i, (event_id, known_time, sig) in enumerate(inserted)
+                    ],
+                )
+    return ImportAccepted(ingest_batch_id=ingest_id, imported=len(inserted), kind="credit_events")
+
+
+# --------------------------------------------------------------------------- #
+# Credit change feed — commit-ordered version cursor for the risk DW
+# --------------------------------------------------------------------------- #
+@app.get(
+    "/api/v1/credit-changes",
+    response_model=CreditChangesPage,
+    tags=["changes"],
+    summary="按游标增量读取实际新增的征信事件版本（风控数仓续读）",
+    description=(
+        "返回 `seq > cursor` 的版本，按提交顺序升序，最多 `limit` 条。"
+        "`next_cursor` 用于续读：不重不漏；没有新版本时 `next_cursor` 不前进。"
+        "旧游标可重复读取同一批历史版本；序号按提交顺序分配，"
+        "后提交的版本绝不会落在已返回的游标之前。"
+    ),
+)
+async def get_credit_changes(
+    cursor: int = Query(default=0, ge=0,
+                        description="已消费的最大版本序号 seq；首次调用传 0 从头读"),
+    limit: int = Query(default=config.DEFAULT_PAGE_SIZE, ge=1, le=config.MAX_PAGE_SIZE),
+) -> CreditChangesPage:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT seq, event_id, customer_id, business_time, known_time,
+                      income, withdrawn, ingest_batch_id, committed_at
+                 FROM credit_change_feed
+                WHERE seq > $1
+                ORDER BY seq
+                LIMIT $2""",
+            cursor, limit,
+        )
+    items = [CreditChangeRow(**dict(r.items())) for r in rows]
+    # No new versions -> the cursor does not advance.
+    next_cursor = items[-1].seq if items else cursor
+    return CreditChangesPage(cursor=cursor, next_cursor=next_cursor,
+                             limit=limit, items=items)
 
 
 # --------------------------------------------------------------------------- #
