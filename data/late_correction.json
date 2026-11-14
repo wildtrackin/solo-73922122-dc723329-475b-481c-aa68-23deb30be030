@@ -1,0 +1,6 @@
+{
+  "events": [
+    {"event_id": "E1", "customer_id": "C1", "business_time": "2026-01-01T00:00:00Z",
+     "known_time": "2026-01-08T09:00:00Z", "income": 51000, "withdrawn": false}
+  ]
+}

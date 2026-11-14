@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: riskdb
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d riskdb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api-1:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/riskdb
+      LEASE_SECONDS: "15"
+      HEARTBEAT_SECONDS: "5"
+      CHUNK_SIZE: "2"          # tiny on purpose: restarts are visible in the demo
+      CHUNK_DELAY_SECONDS: "1" # demo only: leaves a crash window mid-batch
+    ports:
+      - "8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api-2:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/riskdb
+      LEASE_SECONDS: "15"
+      HEARTBEAT_SECONDS: "5"
+      CHUNK_SIZE: "2"
+      CHUNK_DELAY_SECONDS: "1"
+    ports:
+      - "8002:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

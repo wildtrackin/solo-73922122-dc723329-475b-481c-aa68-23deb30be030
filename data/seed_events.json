@@ -1,0 +1,24 @@
+{
+  "events": [
+    {"event_id": "E1", "customer_id": "C1", "business_time": "2026-01-01T00:00:00Z",
+     "known_time": "2026-01-02T09:00:00Z", "income": 50000, "withdrawn": false},
+    {"event_id": "E1", "customer_id": "C1", "business_time": "2026-01-01T00:00:00Z",
+     "known_time": "2026-01-12T09:00:00Z", "income": 52000, "withdrawn": false},
+
+    {"event_id": "E2", "customer_id": "C1", "business_time": "2026-02-15T10:00:00Z",
+     "known_time": "2026-02-16T10:00:00Z", "income": 60000, "withdrawn": false},
+
+    {"event_id": "E3", "customer_id": "C2", "business_time": "2026-01-05T00:00:00Z",
+     "known_time": "2026-01-06T00:00:00Z", "income": 40000, "withdrawn": false},
+    {"event_id": "E3", "customer_id": "C2", "business_time": "2026-01-05T00:00:00Z",
+     "known_time": "2026-02-10T00:00:00Z", "income": null, "withdrawn": true},
+
+    {"event_id": "E4", "customer_id": "C3", "business_time": "2026-03-01T00:00:00Z",
+     "known_time": "2026-03-02T00:00:00Z", "income": 70000, "withdrawn": false},
+
+    {"event_id": "E5A", "customer_id": "C3", "business_time": "2026-03-05T00:00:00Z",
+     "known_time": "2026-03-06T00:00:00Z", "income": 30000, "withdrawn": false},
+    {"event_id": "E5B", "customer_id": "C3", "business_time": "2026-03-05T00:00:00Z",
+     "known_time": "2026-03-06T00:00:00Z", "income": 33000, "withdrawn": false}
+  ]
+}

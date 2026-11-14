@@ -1,0 +1,9 @@
+{
+  "applications": [
+    {"application_id": "A1", "customer_id": "C1", "application_time": "2026-01-11T12:00:00Z"},
+    {"application_id": "A2", "customer_id": "C2", "application_time": "2026-02-20T00:00:00Z"},
+    {"application_id": "A3", "customer_id": "C3", "application_time": "2026-02-20T00:00:00Z"},
+    {"application_id": "A4", "customer_id": "C1", "application_time": "2026-02-20T00:00:00Z"},
+    {"application_id": "A5", "customer_id": "C3", "application_time": "2026-03-10T00:00:00Z"}
+  ]
+}

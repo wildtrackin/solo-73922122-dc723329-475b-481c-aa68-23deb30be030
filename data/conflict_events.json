@@ -1,0 +1,8 @@
+{
+  "events": [
+    {"event_id": "E9", "customer_id": "C9", "business_time": "2026-01-01T00:00:00Z",
+     "known_time": "2026-01-02T00:00:00Z", "income": 10000, "withdrawn": false},
+    {"event_id": "E9", "customer_id": "C9", "business_time": "2026-01-01T00:00:00Z",
+     "known_time": "2026-01-02T00:00:00Z", "income": 11000, "withdrawn": false}
+  ]
+}
